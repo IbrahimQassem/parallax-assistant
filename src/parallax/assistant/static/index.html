@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="assistant-token" content="__TOKEN__"><meta name="assistant-provider" content="__PROVIDER__">
+  <title>Parallax — مساعدك في المتصفح</title>
+  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header><div><span class="eyebrow">PARALLAX / PERSONAL</span><h1>ماذا تريد أن أنجز لك؟</h1>
+      <p>اكتب هدفك. يتولى المساعد التصفح، ويعود إليك عندما يحتاج قرارًا.</p></div><span id="browser-status" class="badge" role="status">جارٍ التحقق من الاتصال…</span></header>
+    <section class="card">
+      <details id="composer" open><summary>مهمة جديدة</summary>
+      <form id="task-form">
+        <label for="task">ما النتيجة التي تريدها؟</label>
+        <textarea id="task" rows="4" maxlength="12000" required aria-describedby="task-keyboard-hint" placeholder="ابحث عن ثلاثة فنادق مناسبة في القاهرة، وقارن السعر والموقع وسياسة الإلغاء…"></textarea>
+        <p id="task-keyboard-hint" class="hint">Enter للإرسال · Shift+Enter لسطر جديد</p>
+        <p class="hint">اذكر التواريخ والميزانية والتفضيلات. أدخل كلمات المرور وبيانات الدفع بنفسك في المتصفح.</p>
+        <fieldset class="consent-settings"><legend>متى يتدخل المستخدم؟</legend>
+          <label for="consent-mode" class="sr-only">طريقة التنفيذ</label>
+          <select id="consent-mode" aria-describedby="consent-help"><option value="browse">تصفح تلقائي — التدخل عند الحاجة</option><option value="review">مراجعة كل خطوة تفاعلية</option></select>
+          <p id="consent-help" class="hint">يفتح القوائم والتبويبات المعروفة تلقائيًا. الحفظ والإرسال والتعبئة والعناصر غير الواضحة تحتاج موافقتك. يمكنك إيقاف المهمة في أي وقت.</p>
+        </fieldset>
+        <div class="toolbar"><label for="provider">المحرك</label><select id="provider"><option value="codex">Codex CLI</option><option value="antigravity">Antigravity CLI</option></select>
+          <button id="start" class="primary" type="submit">ابدأ المهمة</button></div>
+      </form>
+      </details>
+    </section>
+    <section class="card" aria-labelledby="progress-title">
+      <div class="toolbar"><h2 id="progress-title">المهمة الحالية</h2><span id="status" class="badge" role="status">جاهز</span>
+        <button id="pause" disabled>تسلّم المتصفح</button><button id="stop" class="danger" disabled>إيقاف</button></div>
+      <div id="empty-state"><h3>النتيجة تبدأ بمهمة واضحة</h3><p>مثال: «قارن ثلاثة خيارات، واذكر السعر والمصدر، ثم أعطني توصية مختصرة».</p><p class="hint">ستجد هنا تقدم التنفيذ، أي قرار مطلوب منك، والنتيجة النهائية.</p></div>
+      <p id="run-summary" class="hint" hidden></p>
+      <p id="current-task"></p><p id="page" class="address" dir="ltr"></p>
+      <p class="hint" id="approval-hint"></p>
+      <p id="output-status" role="status" class="scope" hidden></p>
+      <div id="pending" role="group" aria-labelledby="pending-title" hidden>
+        <h3 id="pending-title"></h3><p id="approval-why" class="hint"></p><p id="reason"></p><dl id="details"></dl>
+        <div id="handoff-note"><label for="note">ما الذي تغيّر؟ (اختياري)</label><input id="note" maxlength="4000" placeholder="مثال: سجلت الدخول، تابع قراءة الصفحة"></div>
+        <div class="toolbar"><button id="reject" class="danger">إلغاء المهمة</button><button id="approve" class="primary"></button></div>
+      </div>
+      <p id="error" role="alert" hidden></p>
+      <div id="result-tools" class="toolbar" hidden><button id="copy-result">نسخ النتيجة</button><button id="download-result">تنزيل التقرير</button><span id="export-status" role="status" class="hint"></span></div>
+      <section id="result" class="result" aria-label="النتيجة والمصادر" hidden></section>
+      <section id="followup" hidden>
+        <h3>تابع هذه المهمة</h3><p class="hint">تحتفظ المتابعة بسياق آخر نتيجة وتتحقق من الصفحة مجددًا.</p>
+        <div id="suggestions" class="toolbar"></div>
+        <form id="followup-form">
+          <label for="followup-task">ما الذي تريد التعمق فيه؟</label>
+          <textarea id="followup-task" rows="2" maxlength="4000" required aria-describedby="followup-keyboard-hint" placeholder="مثال: افتح تفاصيل المشكلة الأولى وحدد ما تؤكده الأدلة عن سببها"></textarea>
+          <p id="followup-keyboard-hint" class="hint">Enter للإرسال · Shift+Enter لسطر جديد</p>
+          <div class="toolbar"><label for="followup-mode">طريقة المتابعة</label><select id="followup-mode"><option value="browse">تصفح تلقائي</option><option value="review">مراجعة كل خطوة تفاعلية</option></select><button id="followup-submit" class="primary">إرسال المتابعة</button></div>
+        </form>
+      </section>
+      <details id="event-log"><summary>سجل الخطوات</summary><ol id="events"></ol></details>
+    </section>
+    <footer>__BROWSER_MODE__ قد تحتاج بعض المواقع إلى تدخلك اليدوي.</footer>
+  </main>
+</body></html>

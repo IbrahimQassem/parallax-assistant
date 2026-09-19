@@ -153,11 +153,17 @@ def _doctor(_args: argparse.Namespace, _extra: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The assistant has its own parser; the existing sweep CLI stays compatible.
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "assistant":
+        from .assistant.web import main as assistant_main
+        return assistant_main(argv[1:])
     parser = argparse.ArgumentParser(
         prog="parallax",
         description="Relational browser regression: point it at a URL, get failing tests back.",
     )
     subcommands = parser.add_subparsers(dest="command")
+    subcommands.add_parser("assistant", help="launch the local personal browser assistant")
 
     sweep = subcommands.add_parser("sweep", help="witness an application and emit failing specs")
     # The URL is deliberately not an argparse positional. Every other flag is

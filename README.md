@@ -1,5 +1,21 @@
 # Parallax
 
+## Personal assistant mode (local fork)
+
+Behavior and acceptance requirements: [Personal assistant contract v1.0 (Arabic)](docs/ASSISTANT-CONTRACT.ar.md).
+
+This fork adds a local Arabic browser assistant with Codex CLI by default and an
+Antigravity CLI option. After installing the Python package and Chromium, run:
+
+```sh
+parallax assistant
+```
+
+Open `http://127.0.0.1:8765`. Read [the Arabic setup and usage guide](ASSISTANT.ar.md)
+for task examples, manual sign-in, action previews, data storage, and limitations.
+This is a supervised local application, not a public multi-user service. The
+original regression-sweep commands documented below remain available.
+
 [![verify](https://github.com/NexuChat/parallax/actions/workflows/verify.yml/badge.svg?branch=master)](https://github.com/NexuChat/parallax/actions/workflows/verify.yml)
 
 The badge is the graded sweep, not just the unit tests: every push runs the
