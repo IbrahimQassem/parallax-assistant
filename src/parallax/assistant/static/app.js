@@ -7,8 +7,9 @@ let lastEventCount = -1;
 let currentState = null;
 let resultKey = null;
 let layoutKey = null;
-const names = {idle:"جاهز",running:"قيد التنفيذ",waiting:"بانتظارك",completed:"النتيجة جاهزة",cancelled:"متوقفة",failed:"تعذّرت",limited:"وصلت إلى الحد"};
+const names = {idle:"جاهز",running:"قيد التنفيذ",waiting:"بانتظارك",verified:"متحقق منه",partial:"مكتمل جزئيًا",unverified:"غير متحقق منه",cancelled:"متوقفة",failed:"تعذّرت",limited:"وصلت إلى الحد"};
 const verbs = {click:"النقر على العنصر",fill:"تعبئة الحقل",select:"اختيار القيمة",press:"الضغط على المفتاح"};
+const terminalResults = new Set(["verified","partial","unverified"]);
 async function api(path, data) {
   const response = await fetch(path, {method:data ? "POST" : "GET", headers:{"X-Parallax-Token":auth,"Content-Type":"application/json"}, ...(data ? {body:JSON.stringify(data)} : {})});
   const body = await response.json();
@@ -42,8 +43,32 @@ function readableText(text) {
   });
   return block;
 }
+function completionName(status) { return names[status] || "غير متحقق منه"; }
+function renderCompletion(completion, sources) {
+  const section=node("section",undefined,"completion");
+  section.append(node("h4","حالة الإنجاز والتحقق"));
+  section.append(node("p",completionName(completion?.status),"completion-status "+(completion?.status || "unverified")));
+  section.append(readableText(completion?.reason || "لا يوجد دليل تحقق قابل للمراجعة."));
+  for (const [title, values, empty] of [["ما أُنجز",completion?.done,"لم يثبت إنجاز محدد."],["ما بقي",completion?.remaining,"لم يذكر المحرك ما بقي؛ لا يعني ذلك اكتمال المهمة."]]) {
+    const block=node("div",undefined,"completion-list");block.append(node("h5",title));
+    const list=node("ul");for (const value of values?.length ? values : [empty]) list.append(node("li",value));
+    block.append(list);section.append(block);
+  }
+  const evidence=node("div",undefined,"completion-evidence");evidence.append(node("h5","أدلة التحقق"));
+  if (completion?.evidence?.length) {
+    const list=node("ul");
+    for (const item of completion.evidence) {
+      const source=sources.find(s=>s.id===item.source_id);const row=node("li");
+      row.append(readableText(item.claim));
+      if (source) row.append(sourceLink(source,"فتح المصدر "+item.source_id));
+      row.append(node("span",item.observed_after_action ? "قُرئ بعد آخر خطوة تفاعلية." : "قُرئ قبل أي خطوة تفاعلية.","hint"));list.append(row);
+    }
+    evidence.append(list);
+  } else evidence.append(node("p","لا توجد أدلة صفحة قابلة للتحقق لهذه النتيجة.","hint"));
+  section.append(evidence);return section;
+}
 function renderResult(state) {
-  const key=JSON.stringify([state.id,state.result,state.report,state.sources,state.finished_at]);
+  const key=JSON.stringify([state.id,state.result,state.report,state.completion,state.sources,state.finished_at]);
   if (resultKey===key) return;
   resultKey=key;
   const container=$("result");container.replaceChildren();
@@ -86,6 +111,7 @@ function renderResult(state) {
     for (const item of report.limitations.length ? report.limitations : ["لم يذكر المحرك قيودًا إضافية؛ هذا لا يعني أن كل استنتاج تحقق منه مستقلًا."]) list.append(node("li",item));
     limits.append(list);container.append(limits);
   } else container.append(readableText(state.result));
+  container.append(renderCompletion(state.completion || report?.completion, sources));
   if (sources.length) {
     const evidence=node("details");
     evidence.append(node("summary",`صفحات قرأها المساعد (${sources.length})`),
@@ -133,13 +159,13 @@ function render(state) {
   $("output-status").textContent=state.status==="waiting"
     ? (state.pending?.type==="approval" ? "لم تصدر النتيجة بعد. المهمة تنتظر اعتماد الخطوة أدناه." : "لم تصدر النتيجة بعد. المهمة متوقفة؛ سبب التوقف والخطوة المطلوبة موضحان أدناه.")
     : `${state.phase || "جارٍ معالجة المهمة"} — ستظهر المخرجات هنا عند اكتمال التحليل.`;
-  $("followup").hidden=state.status!=="completed";
+  $("followup").hidden=!terminalResults.has(state.status);
   $("result-tools").hidden=!state.result;
   $("followup-submit").disabled=submitting;
   renderResult(state);
   const nextLayout=JSON.stringify([state.id,state.status]);
   if (layoutKey!==nextLayout) {
-    if (state.status==="completed") {$("composer").open=false;$("event-log").open=false;$("followup-mode").value=state.consent_mode || "browse";}
+    if (terminalResults.has(state.status)) {$("composer").open=false;$("event-log").open=false;$("followup-mode").value=state.consent_mode || "browse";}
     if (active) $("composer").open=false;
     if (currentState.id !== JSON.parse(layoutKey || "[null]")[0]) lastEventCount=-1;
     layoutKey=nextLayout;
@@ -184,7 +210,7 @@ $("task-form").addEventListener("submit",async e=>{
   finally {submitting=false;}
 });
 $("followup-form").addEventListener("submit",async e=>{
-  e.preventDefault();if(submitting || currentState?.status!=="completed")return;
+  e.preventDefault();if(submitting || !terminalResults.has(currentState?.status))return;
   submitting=true;$("followup-submit").disabled=true;$("error").hidden=true;
   try {
     $("export-status").textContent="";
@@ -214,6 +240,8 @@ function exportText() {
   for (const finding of report?.findings || []) {
     lines.push("",finding.title,finding.detail,...finding.metrics.map(m=>`${m.label}: ${m.value}`));
   }
+  const completion=currentState?.completion || report?.completion;
+  if (completion) lines.push("","حالة الإنجاز والتحقق",completionName(completion.status),completion.reason || "", "", "ما أُنجز",...(completion.done || []).map(v=>"- "+v), "", "ما بقي",...(completion.remaining || []).map(v=>"- "+v));
   if (report?.limitations?.length) lines.push("","حدود النتيجة",...report.limitations.map(v=>`- ${v}`));
   if (currentState?.sources?.length) lines.push("","المصادر المقروءة",...currentState.sources.map(s=>`${s.id} — ${s.title}\n${s.url}`));
   return lines.join("\n");

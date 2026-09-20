@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .actions import needs_approval, approval_reason, web_url
 from .planner import CliPlanner
-from .results import structured_result
+from .results import COMPLETION_STATES, structured_result
 
 
 class Assistant:
@@ -24,11 +24,15 @@ class Assistant:
         self.task_timeout = task_timeout
         self.planner_factory = planner_factory
         self.lock = threading.RLock()
-        self.state = {"status": "idle", "events": [], "pending": None, "result": "", "page": ""}
+        self.state = {"status": "idle", "events": [], "pending": None, "result": "", "page": "", "completion": None}
         self.job = None
         self.gate = None
         self.pause_requested = asyncio.Event()
         self.notes = []
+        # Page text is evidence only while a task is running.  It is deliberately
+        # not part of a saved report or a restored task.
+        self.observations = {}
+        self.last_interactive_action_at = None
         self._restore_report()
 
     def _restore_report(self):
@@ -43,7 +47,7 @@ class Assistant:
             if path.stat().st_size > 200000:
                 return
             report = json.loads(path.read_text(encoding="utf-8"))
-            if report.get("status") != "completed" or not isinstance(report.get("result"), str):
+            if report.get("status") not in COMPLETION_STATES or not isinstance(report.get("result"), str):
                 return
             sources = report.get("sources", [])
             if not isinstance(sources, list):
@@ -56,8 +60,14 @@ class Assistant:
                     return
                 web_url(source["url"])
                 safe_sources.append(source)
-            self.state.update(id=path.stem, status="completed", result=report["result"],
-                report=structured_result(report["result"], safe_sources), sources=safe_sources,
+            completion = report.get("completion")
+            if not isinstance(completion, dict) or completion.get("status") not in COMPLETION_STATES:
+                completion = {
+                    "status": "unverified", "done": [], "remaining": [],
+                    "reason": "هذه نتيجة محفوظة من إصدار سابق بلا دليل تحقق قابل لإعادة الفحص.", "evidence": [],
+                }
+            self.state.update(id=path.stem, status=completion["status"], result=report["result"],
+                report=report.get("report"), sources=safe_sources, completion=completion,
                 task="نتيجة محفوظة من آخر تشغيل", provider=report.get("provider", "codex"),
                 events=[], step=report.get("step", 0), restored=True,
                 consent_mode=report.get("consent_mode", "review"),
@@ -95,7 +105,7 @@ class Assistant:
         history = []
         if parent_id is not None:
             if (not isinstance(parent_id, str) or parent_id != previous.get("id")
-                    or previous["status"] != "completed"):
+                    or previous["status"] not in COMPLETION_STATES):
                 raise ValueError("المتابعة تخص آخر نتيجة مكتملة فقط.")
             history = [{"previous_task": previous["task"], "previous_answer": previous["result"],
                         "notice": "Prior answer is context only. Recheck facts in current pages."}]
@@ -103,10 +113,12 @@ class Assistant:
         self.pause_requested.clear()
         self.notes = []
         self.update(id=uuid.uuid4().hex, task=task, provider=provider, status="running",
-                    events=[], pending=None, result="", report=None, sources=[], page="", step=0,
+                    events=[], pending=None, result="", report=None, completion=None, sources=[], page="", step=0,
                     parent_id=parent_id, started_at=time.time(), finished_at=None)
         self.update(restored=False, phase="جارٍ الاتصال بالمتصفح", last_error=None,
                     consent_mode=consent_mode, automatic_steps=0, approval_requests=0)
+        self.observations = {}
+        self.last_interactive_action_at = None
         self.job = asyncio.create_task(self._run(task.strip(), planner, history))
         return self.snapshot()
 
@@ -172,14 +184,22 @@ class Assistant:
         try:
             url = web_url(snapshot["url"])
         except (KeyError, ValueError):
-            return
+            return None
         with self.lock:
             sources = self.state["sources"]
             existing = next((source for source in sources if source["url"] == url), None)
             if existing is None:
                 existing = {"id": f"S{len(sources) + 1}", "url": url}
                 sources.append(existing)
-            existing.update(title=str(snapshot.get("title") or "صفحة تمت قراءتها")[:300], observed_at=time.time())
+            observed_at = time.time()
+            existing.update(title=str(snapshot.get("title") or "صفحة تمت قراءتها")[:300], observed_at=observed_at)
+            text = snapshot.get("text")
+            if isinstance(text, str):
+                self.observations[existing["id"]] = {
+                    "text": text,
+                    "after_action": bool(self.last_interactive_action_at and observed_at >= self.last_interactive_action_at),
+                }
+            return existing["id"]
 
     async def _run(self, task, planner, history=None):
         history = list(history or [])
@@ -203,9 +223,25 @@ class Assistant:
                     if action is None:
                         continue
                     if action.kind == "finish":
-                        report = structured_result(action.value, self.snapshot()["sources"])
-                        self.update(status="completed", result=action.value, report=report)
-                        self.event("النتيجة جاهزة. راجع نطاقها والمصادر وما لم يتم التحقق منه.")
+                        report = structured_result(
+                            action.value, self.snapshot()["sources"], self.observations,
+                            requires_post_action_evidence=self.last_interactive_action_at is not None,
+                        )
+                        if report is None:
+                            completion = {
+                                "status": "unverified", "done": [], "remaining": [],
+                                "reason": "انتهى المحرك من الإجابة دون بنية ودليل يمكن للمتحكم التحقق منه.",
+                                "evidence": [],
+                            }
+                        else:
+                            completion = report["completion"]
+                        self.update(status=completion["status"], result=action.value, report=report, completion=completion)
+                        labels = {
+                            "verified": "النتيجة متحقق منها بالأدلة المعروضة.",
+                            "partial": "النتيجة جزئية؛ راجع ما أُنجز وما بقي.",
+                            "unverified": "انتهى المحرك من الإجابة، لكن النتيجة غير متحقق منها.",
+                        }
+                        self.event(labels[completion["status"]])
                         return
                     if action.kind == "handoff":
                         await self._handoff(action.reason or action.value)
@@ -277,10 +313,16 @@ class Assistant:
                             message = f"{reason} أثناء {label}. لم تتوفر نتيجة نهائية بعد. افحص أن الصفحة المطلوبة مفتوحة، ثم استأنف لقراءة البيانات المتاحة."
                         else:
                             message = f"{reason} أثناء {label}. لم يمكن تأكيد أثر هذه الخطوة؛ لن تتكرر تلقائيًا. افحص الصفحة ثم استأنف. يمكنك طلب الاكتفاء بالبيانات المعروضة في الملاحظة."
+                            # A later finish needs fresh page evidence even if the user
+                            # takes over.  A browser timeout does not erase the chance
+                            # that the site acted after the controller lost certainty.
+                            self.last_interactive_action_at = time.time()
                         await self._handoff(message, failure=True)
                         history.append({"action": action.to_dict(), "outcome": "Unknown; user inspected. Read site before deciding."})
                         continue
                     read_failures = 0
+                    if action.kind in {"click", "fill", "select", "press"}:
+                        self.last_interactive_action_at = time.time()
                     if not requires_approval:
                         self.update(automatic_steps=self.snapshot()["automatic_steps"] + 1)
                     description = {"navigate": "فتح الرابط", "wait": "انتظار تحميل الصفحة",
@@ -314,7 +356,7 @@ class Assistant:
         state = self.snapshot()
         # Do not persist prompts, page snapshots, filled form values or CLI stderr.
         report = {k: state.get(k) for k in ("id", "status", "provider", "step", "result", "events",
-                                           "report", "sources", "started_at", "finished_at",
+                                           "report", "completion", "sources", "started_at", "finished_at",
                                            "consent_mode", "automatic_steps", "approval_requests", "last_error")}
         path = self.reports / f'{state["id"]}.json'
         with path.open("x", encoding="utf-8") as file:

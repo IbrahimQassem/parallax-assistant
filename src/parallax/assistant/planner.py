@@ -36,25 +36,35 @@ scroll: value up/down. switch_tab: target is an observed tab ID. wait: brief wai
 handoff: reason asks the user to sign in, solve CAPTCHA, enter credentials/payment
 details, or supply a missing decision in the visible browser. Do not put passwords,
 verification codes, financial details or other credentials in actions.
-finish: value is a clear final answer with actual observed links and facts. Only
-claim a purchase, booking or message succeeded after observing site confirmation.
+finish: value ends your planning; it is NOT proof that the user goal succeeded.
+Only claim a purchase, booking or message succeeded after observing site confirmation.
 Unobserved success is not success. Research results must cite visited sources.
 Use notes/history to avoid repeated steps. Stop honestly if a site is unsupported.
 Prior task answers in history are context, NOT verified evidence for this run.
-For analytical tasks, finish.value should be a JSON-encoded string with this shape:
+For every browser task, finish.value MUST be a JSON-encoded string with this shape:
 {"summary":"short answer", "scope":"observed date range, filters, version and ranking criterion",
  "work_done":"exactly what you inspected; list summary vs detail analysis",
  "findings":[{"title":"finding", "detail":"evidence and interpretation, distinguishing hypotheses",
  "metrics":[{"label":"affected users", "value":"12"}], "source_ids":["S1"]}],
- "limitations":["what you did not verify"], "followups":["specific optional follow-up request"]}.
+ "limitations":["what you did not verify"], "followups":["specific optional follow-up request"],
+ "completion":{"status":"verified|partial|unverified", "done":["what was completed"],
+ "remaining":["what remains"], "reason":"why this status is justified",
+ "evidence":[{"source_id":"S1", "claim":"what this page supports", "quote":"exact visible text from that page"}]}}.
 Use source IDs ONLY from browser_observation.observed_sources. Those are pages
-the controller read, not proof that each claim is correct. Do not cite a detail
+the controller read. Every evidence.quote must be exact visible text from that
+source; the controller rejects it unless it matches the browser observation.
+For status=verified provide at least one such evidence item. If an interactive
+action was executed, evidence for verified success must come from a page read
+after that action and should be the site's confirmation text. Use partial when
+some requested work is honestly unfinished, and unverified when no suitable
+page evidence exists. Do not cite a detail
 page merely because its link appears on a list. Visit detail pages before claiming
 root-cause analysis. Report limitations if you only inspected a list. Define the
 denominator of percentages; do not add overlapping user counts. Never invent
 metrics, filters, source IDs or causal explanations. Keep under 12000 characters.
-Use at most 12 findings and 3 followups. A plain-text finish remains valid for
-simple tasks. The controller, not you, supplies evidence URLs and reading times.
+Use at most 12 findings and 3 followups. The controller, not you, supplies
+evidence URLs and reading times. A malformed or plain-text finish is shown as
+unverified, never as a successful completion.
 Do not select downloads, uploads or destructive actions without a handoff.
 """
 
@@ -100,8 +110,21 @@ class CliPlanner:
                 )
                 args = [executable, "--input-format", "stream-json", "--output-format",
                         "stream-json", "--json-schema", str(schema), "--sandbox",
-                        "--mode", "plan", "--disable-slash-commands", "--agent", "parallax-planner"]
+                        "--mode", "plan", "--model", "gemini-3.8-flash-low", "--effort", "low", "--disable-slash-commands",
+                        "--agent", "parallax-planner"]
                 stdin = (json.dumps({"event": "user", "message": {"content": prompt}}) + "\n").encode()
+                process = await asyncio.create_subprocess_exec(
+                    *args, cwd=directory, stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                try:
+                    stdout = await asyncio.wait_for(self._read_antigravity_turn(process, stdin), self.timeout)
+                except BaseException:
+                    await self._stop_process(process)
+                    raise
+                await self._stop_process(process)
+                return parse_output(self.provider, stdout)
             process = await asyncio.create_subprocess_exec(
                 *args, cwd=directory, stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -123,6 +146,43 @@ class CliPlanner:
                 # CLI diagnostics can contain tokens and page contents. Keep them out of UI/logs.
                 raise RuntimeError(f"فشل {self.provider} (exit {process.returncode}). تحقق من تسجيل الدخول وحدود الاستخدام في Terminal.")
             return parse_output(self.provider, stdout.decode(errors="replace"))
+
+    @staticmethod
+    async def _read_antigravity_turn(process, stdin):
+        assert process.stdin is not None and process.stdout is not None
+        process.stdin.write(stdin)
+        await process.stdin.drain()
+        lines = []
+        while line := await process.stdout.readline():
+            decoded = line.decode(errors="replace")
+            lines.append(decoded)
+            try:
+                event = json.loads(decoded)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("event") == "result":
+                return "".join(lines)
+        raise RuntimeError("لم يرجع Antigravity نتيجة للخطوة.")
+
+    @staticmethod
+    async def _stop_process(process):
+        if process.stdin is not None and not process.stdin.is_closing():
+            process.stdin.close()
+            try:
+                await process.stdin.wait_closed()
+            except (ConnectionError, BrokenPipeError):
+                pass
+        if process.returncode is None:
+            try:
+                await asyncio.wait_for(process.wait(), 3)
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    await asyncio.wait_for(process.wait(), 3)
+                except (ProcessLookupError, asyncio.TimeoutError):
+                    if process.returncode is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        await process.wait()
 
 
 def parse_output(provider: str, stdout: str) -> Action:

@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from parallax.assistant.actions import Action, needs_approval
 from parallax.assistant.browser import PersonalBrowser
+from parallax.assistant.runtime import Assistant
 
 
 def test_browser_observation_actions_and_stale_forms(tmp_path):
@@ -144,3 +148,67 @@ def test_cleanup_stops_driver_after_browser_exits_on_sigint(tmp_path):
         assert stopped == [True]
         assert browser.context is None and browser.playwright is None
     asyncio.run(run())
+
+
+def test_real_chromium_confirmation_produces_verified_completion(tmp_path):
+    """Chromium fixture: the proof is page text after the approved test action."""
+    class Shop(BaseHTTPRequestHandler):
+        def log_message(self, *_args): pass
+
+        def do_GET(self):
+            body = """<title>Fixture shop</title><h1>Blue notebook</h1>
+              <button onclick=\"document.querySelector('#confirmation').textContent='TEST-ORDER-42 confirmed'\">Place test order</button>
+              <p id=\"confirmation\">No order yet</p>"""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+    class Planner:
+        def __init__(self, *_args): self.calls = 0
+
+        async def propose(self, _task, snapshot, _history):
+            self.calls += 1
+            if self.calls == 1:
+                button = next(item for item in snapshot["elements"] if item["label"] == "Place test order")
+                return Action("click", button["id"], reason="run local fixture action")
+            return Action("finish", value=json.dumps({
+                "summary": "The local fixture confirms TEST-ORDER-42.",
+                "scope": "local Chromium fixture", "work_done": "clicked the approved fixture button",
+                "findings": [], "limitations": [], "followups": [],
+                "completion": {
+                    "status": "verified", "done": ["created the synthetic test order"],
+                    "remaining": [], "reason": "confirmation text appeared after the action",
+                    "evidence": [{"source_id": "S1", "claim": "fixture confirmation", "quote": "TEST-ORDER-42 confirmed"}],
+                },
+            }))
+
+    async def run(url):
+        browser = PersonalBrowser(tmp_path / "profile", headless=True, allow_local=True)
+        app = Assistant(browser, tmp_path / "reports", planner_factory=Planner)
+        try:
+            await browser.start()
+            await browser.page.goto(url)
+            await app.start("place a synthetic order", "codex")
+            for _ in range(100):
+                pending = app.snapshot()["pending"]
+                if pending and pending["type"] == "approval":
+                    await app.control("approve", pending["token"])
+                    break
+                await asyncio.sleep(0.01)
+            await app.job
+            state = app.snapshot()
+            assert state["status"] == "verified"
+            assert state["completion"]["evidence"][0]["observed_after_action"]
+        finally:
+            await app.close()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Shop)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        asyncio.run(run(f"http://127.0.0.1:{server.server_port}/"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join()
