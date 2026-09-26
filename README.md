@@ -4,6 +4,11 @@
 
 Behavior and acceptance requirements: [Personal assistant contract v1.0 (Arabic)](docs/ASSISTANT-CONTRACT.ar.md).
 
+Development review: [general web assistant plan](docs/DEVELOPMENT-PLAN.ar.md),
+[v2 draft contracts](docs/ASSISTANT-CONTRACTS-V2.ar.md), and
+[acceptance matrix](docs/ASSISTANT-ACCEPTANCE-V2.ar.md). Use cases illustrate the
+general assistant; the draft requirements do not imply implemented capabilities.
+
 This fork adds a local Arabic browser assistant with Codex CLI by default and an
 Antigravity CLI option. After installing the Python package and Chromium, run:
 
