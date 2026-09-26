@@ -135,6 +135,62 @@ def test_followup_keeps_context_rechecks_evidence_and_rejects_stale_parent(tmp_p
     asyncio.run(run())
 
 
+def test_followup_files_survive_restart_without_copying_bytes_or_leaking_contents(tmp_path):
+    contexts = []
+    content = b"PRIVATE-FOLLOWUP-CONTENT"
+
+    class Finish:
+        def __init__(self, *_args): pass
+        async def propose(self, _task, snapshot, history):
+            contexts.append((snapshot["assistant_context"], history))
+            return Action("finish", value=json.dumps(final_payload()))
+
+    async def run():
+        app = Assistant(Browser(), tmp_path, planner_factory=Finish)
+        await app.start("prepare document", "codex")
+        await app.job
+        parent = app.snapshot()["id"]
+        with app.artifacts.staging(parent) as stage:
+            stage.write_bytes(content)
+            original = app.artifacts.commit(parent, stage, "document.txt", source_kind="user_selected")
+        await app.start("use the prepared document", "codex", parent)
+        await app.job
+        child = app.snapshot()
+        reference, = child["artifacts"]
+        assert reference["task_id"] == child["id"] and reference["id"] != original["id"]
+        assert reference["source_kind"] == "inherited"
+        assert child["approval_requests"] == 0 and child["file_context_warning"] is None
+        assert contexts[-1][0]["artifacts"] == [reference]
+        assert content.decode() not in json.dumps(contexts)
+        assert "source" not in reference
+        with pytest.raises(ValueError): app.artifacts.read(child["id"], original["id"])
+        await app.close()
+
+        restored = Assistant(Browser(), tmp_path, planner_factory=Finish)
+        assert restored.snapshot()["restored"] is True
+        assert restored.snapshot()["artifacts"] == [reference]
+        assert restored.artifacts.read(child["id"], reference["id"])[1] == content
+        await restored.start("continue with that document", "codex", child["id"])
+        await restored.job
+        latest = restored.snapshot()
+        descendant, = latest["artifacts"]
+        restored.artifacts.delete(child["id"], reference["id"])
+        assert restored.artifacts.read(latest["id"], descendant["id"])[1] == content
+        assert len(list((tmp_path / "files").glob("*/*.data"))) == 1
+        restored.artifacts.delete(parent, original["id"])
+        assert restored.snapshot()["artifacts"][0]["available"] is False
+        await restored.start("continue despite unavailable document", "codex", latest["id"])
+        await restored.job
+        assert restored.snapshot()["artifacts"] == []
+        assert contexts[-1][0]["file_context_warning"]
+        await restored.start("an unrelated request", "codex")
+        await restored.job
+        assert contexts[-1][0]["artifacts"] == []
+        assert contexts[-1][0]["file_context_warning"] is None
+        await restored.close()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("url", ["javascript:alert(1)", "file:///etc/passwd", "https://user:pass@example.com", "https://example.com/\n"])
 def test_navigation_rejects_non_web_and_credentials(url):
     with pytest.raises(ValueError):
@@ -465,4 +521,167 @@ def test_ambiguous_consequential_action_cannot_become_verified_from_early_answer
         assert state["last_error"]["action"] == "click"
         assert state["status"] == "unverified"
         assert len(browser.executed) == 1
+    asyncio.run(run())
+
+
+def test_unknown_effect_cannot_be_verified_by_unrelated_fresh_page_text(tmp_path):
+    class Proposals:
+        def __init__(self, *_args): self.calls = 0
+        async def propose(self, *_args):
+            self.calls += 1
+            return Action("click", "1") if self.calls == 1 else Action("finish", value=json.dumps(final_payload()))
+
+    async def run():
+        browser = Browser()
+        browser.fail = True
+        app = Assistant(browser, tmp_path, planner_factory=Proposals)
+        await app.start("send once", "codex")
+        approval = await waiting(app)
+        await app.control("approve", approval["token"])
+        handoff = await waiting_after(app, approval["token"])
+        assert handoff["type"] == "handoff"
+        await app.control("resume", handoff["token"])
+        await app.job
+        state = app.snapshot()
+        assert state["status"] == state["report"]["completion"]["status"] == "unverified"
+        assert state["uncertain_actions"][0]["status"] == "unknown"
+        assert "إرسال غير مؤكد" in state["completion"]["reason"]
+        restored = Assistant(Browser(), tmp_path, planner_factory=Proposals)
+        assert restored.snapshot()["operations"][0]["id"] == state["operations"][0]["id"]
+    asyncio.run(run())
+
+
+async def waiting_after(app, previous_token):
+    for _ in range(200):
+        value = app.snapshot()["pending"]
+        if value and value["token"] != previous_token:
+            return value
+        if app.job.done():
+            raise AssertionError(app.snapshot())
+        await asyncio.sleep(0.005)
+    raise AssertionError("no new pending decision")
+
+
+@pytest.mark.parametrize("occurred", [True, False])
+def test_recovered_unknown_write_requires_manual_reconciliation_before_retry(tmp_path, occurred):
+    import uuid
+
+    class Proposals:
+        def __init__(self, *_args): self.calls = 0
+        async def propose(self, *_args):
+            self.calls += 1
+            return Action("click", "1") if self.calls < 3 else Action("finish", value="available report")
+
+    async def run():
+        old = Assistant(Browser(), tmp_path, planner_factory=Proposals)
+        attempt = old.journal.begin(Action("click", "1"), "https://example.com", None,
+                                    uuid.uuid4().hex, uuid.uuid4().hex)
+        old.journal.settle(attempt, "unknown")
+        browser = Browser()
+        app = Assistant(browser, tmp_path, planner_factory=Proposals)
+        await app.start("inspect and continue the request", "codex")
+        handoff = await waiting(app)
+        assert handoff["type"] == "handoff" and not browser.executed
+        assert app.snapshot()["approval_requests"] == 0
+        await app.control("effect_occurred" if occurred else "effect_absent", attempt)
+        assert app.snapshot()["pending"]["token"] == handoff["token"]
+        assert not browser.executed
+        await app.control("resume", handoff["token"])
+        if not occurred:
+            approval = await waiting_after(app, handoff["token"])
+            assert approval["type"] == "approval" and not browser.executed
+            await app.control("approve", approval["token"])
+        await app.job
+        assert len(browser.executed) == (0 if occurred else 1)
+        assert not app.snapshot()["uncertain_actions"]
+    asyncio.run(run())
+
+
+def test_cancelled_inflight_action_is_persisted_as_unknown_and_can_be_checked_when_idle(tmp_path):
+    async def run():
+        sending = asyncio.Event()
+
+        class SlowBrowser(Browser):
+            async def execute(self, action):
+                sending.set()
+                await asyncio.Future()
+
+        app = Assistant(SlowBrowser(), tmp_path, planner_factory=Planner)
+        await app.start("send", "codex")
+        approval = await waiting(app)
+        await app.control("approve", approval["token"])
+        await asyncio.wait_for(sending.wait(), 1)
+        attempt = app.snapshot()["operations"][0]["id"]
+        with pytest.raises(ValueError, match="قيد التنفيذ"):
+            await app.control("effect_absent", attempt)
+        await app.control("stop")
+        assert app.snapshot()["status"] == "cancelled"
+        assert app.snapshot()["uncertain_actions"][0]["status"] == "unknown"
+        recovered = Assistant(Browser(), tmp_path)
+        assert recovered.snapshot()["status"] == "idle"
+        await recovered.control("effect_occurred", attempt)
+        assert not recovered.snapshot()["uncertain_actions"]
+    asyncio.run(run())
+
+
+def test_journal_must_be_durable_before_browser_execution(tmp_path, monkeypatch):
+    async def run():
+        browser = Browser()
+        app = Assistant(browser, tmp_path, planner_factory=Planner)
+
+        def unavailable(*_args, **_kwargs):
+            raise RuntimeError("تعذّر حفظ محاولة الإرسال")
+
+        monkeypatch.setattr(app.journal, "begin", unavailable)
+        await app.start("send", "codex")
+        approval = await waiting(app)
+        await app.control("approve", approval["token"])
+        await app.job
+        assert app.snapshot()["status"] == "failed"
+        assert not browser.executed
+    asyncio.run(run())
+
+
+def test_unavailable_journal_preserves_answer_without_claiming_verification(tmp_path, monkeypatch):
+    class Finish:
+        def __init__(self, *_args): pass
+        async def propose(self, *_args):
+            return Action("finish", value=json.dumps(final_payload()))
+
+    async def run():
+        app = Assistant(Browser(), tmp_path, planner_factory=Finish)
+
+        def unavailable(*_args):
+            raise RuntimeError("storage unavailable")
+
+        monkeypatch.setattr(app.journal, "has_uncertain", unavailable)
+        await app.start("read the page", "codex")
+        await app.job
+        state = app.snapshot()
+        assert state["status"] == state["report"]["completion"]["status"] == "unverified"
+        assert state["report"]["summary"] == "answer"
+        assert "تعذّر فحص سجل" in state["completion"]["reason"]
+        assert not app.browser.executed
+    asyncio.run(run())
+
+
+def test_successful_browser_return_without_predeclared_condition_is_unverified(tmp_path):
+    class Proposals:
+        def __init__(self, *_args): self.calls = 0
+        async def propose(self, *_args):
+            self.calls += 1
+            return Action("click", "1") if self.calls == 1 else Action("finish", value=json.dumps(final_payload()))
+
+    async def run():
+        app = Assistant(Browser(), tmp_path, planner_factory=Proposals)
+        await app.start("submit and verify", "codex")
+        approval = await waiting(app)
+        assert approval["effect_check"] is None
+        await app.control("approve", approval["token"])
+        await app.job
+        state = app.snapshot()
+        assert len(app.browser.executed) == 1
+        assert state["status"] == "unverified"
+        assert state["completion"]["evidence"][0]["observed_after_action"]
+        assert state["completion"]["effect_checks"][0]["status"] == "no_condition"
     asyncio.run(run())

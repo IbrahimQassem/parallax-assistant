@@ -20,7 +20,7 @@
         <fieldset class="consent-settings"><legend>متى يتدخل المستخدم؟</legend>
           <label for="consent-mode" class="sr-only">طريقة التنفيذ</label>
           <select id="consent-mode" aria-describedby="consent-help"><option value="browse">تصفح تلقائي — التدخل عند الحاجة</option><option value="review">مراجعة كل خطوة تفاعلية</option></select>
-          <p id="consent-help" class="hint">يفتح القوائم والتبويبات المعروفة تلقائيًا. الحفظ والإرسال والتعبئة والعناصر غير الواضحة تحتاج موافقتك. يمكنك إيقاف المهمة في أي وقت.</p>
+          <p id="consent-help" class="hint">يتصفح تلقائيًا وينفذ تغيير إعداد محدد في طلبك عندما يطابق الحساب والقيم المرصودة. يعرض معاينة عند الحاجة لقرار جديد. يمكنك إيقاف المهمة أو اختيار مراجعة كل خطوة.</p>
         </fieldset>
         <div class="toolbar"><label for="provider">المحرك</label><select id="provider"><option value="codex">Codex CLI</option><option value="antigravity">Antigravity CLI</option></select>
           <button id="start" class="primary" type="submit">ابدأ المهمة</button></div>
@@ -33,6 +33,44 @@
       <div id="empty-state"><h3>النتيجة تبدأ بمهمة واضحة</h3><p>مثال: «قارن ثلاثة خيارات، واذكر السعر والمصدر، ثم أعطني توصية مختصرة».</p><p class="hint">ستجد هنا تقدم التنفيذ، أي قرار مطلوب منك، والنتيجة النهائية.</p></div>
       <p id="run-summary" class="hint" hidden></p>
       <p id="current-task"></p><p id="page" class="address" dir="ltr"></p>
+      <section id="operation-authority" class="scope" aria-labelledby="authority-title" hidden>
+        <h3 id="authority-title">اعتماد العملية الحالية</h3>
+        <div id="authority-details"></div>
+        <p id="authority-status" role="status"></p>
+        <p id="authority-expiry" class="hint"></p>
+        <button id="revoke-operation" type="button">إلغاء اعتماد الخطوات المتبقية والتسلّم</button>
+      </section>
+      <section id="uncertain-actions" class="uncertain-actions" aria-labelledby="uncertain-title" hidden>
+        <h3 id="uncertain-title">إجراءات تحتاج فحص الأثر</h3>
+        <p class="hint">قد يكون الإجراء قد وصل إلى الموقع. افحصه هناك قبل تسجيل النتيجة؛ تسجيل فحصك لا يعيد الإرسال ولا يستأنف المتصفح.</p>
+        <p id="journal-error" role="alert" hidden></p>
+        <div id="uncertain-list"></div>
+      </section>
+      <section id="task-plan" class="task-plan" aria-labelledby="plan-title" hidden>
+        <h3 id="plan-title">خطة المهمة</h3>
+        <p id="plan-notice" class="hint" role="status"></p>
+        <div id="plan-content"></div>
+      </section>
+      <details id="task-revision" hidden><summary>تعديل التوجيه أثناء العمل</summary>
+        <form id="revision-form">
+          <label for="revision-note">ما الذي تريد تغييره أو توضيحه؟</label>
+          <textarea id="revision-note" rows="2" maxlength="4000" required aria-describedby="revision-help" placeholder="مثال: اجعل المقارنة للخطة الشهرية فقط، ولا ترسل النموذج"></textarea>
+          <p id="revision-help" class="hint">يعيد المساعد تقييم الخطوات التالية. ما نُفّذ بالفعل لا يُلغى تلقائيًا. لا تكتب كلمات مرور أو رموز تحقق.</p>
+          <button id="revision-submit" type="submit">تحديث التوجيه</button>
+          <p id="revision-status" class="hint" role="status"></p>
+        </form>
+      </details>
+      <details id="checkpoint-save" hidden><summary>حفظ نقطة متابعة لاحقًا</summary>
+        <form id="checkpoint-form">
+          <label for="checkpoint-brief">النص الذي تريد حفظه للمتابعة</label>
+          <textarea id="checkpoint-brief" rows="3" maxlength="4000" required placeholder="اكتب الهدف والقيود وما بقي، دون كلمات مرور أو رموز تحقق أو روابط استرداد سرية"></textarea>
+          <label for="checkpoint-days">مدة الاحتفاظ بالنقطة وتقرير المهمة وملفاتها</label>
+          <select id="checkpoint-days"><option value="1">يوم</option><option value="7" selected>7 أيام</option><option value="30">30 يومًا</option><option value="90">90 يومًا</option></select>
+          <p class="hint">يُحفظ النص الذي تكتبه فقط مع ارتباطه بسجل العمليات وملفات المهمة. إذا كانت المهمة تنتظرك، يحفظ الزر نقطة المتابعة ويوقفها. أثناء التنفيذ تسلّم المتصفح أولًا. الاستئناف لاحقًا يقرأ الصفحة مجددًا ولا يعيد موافقات قديمة. انتهاء المدة يحذف النقطة والتقرير وملفاته.</p>
+          <button id="checkpoint-submit" type="submit">حفظ النقطة وإيقاف المهمة إن كانت نشطة</button>
+          <p id="checkpoint-status" role="status"></p>
+        </form>
+      </details>
       <p class="hint" id="approval-hint"></p>
       <p id="output-status" role="status" class="scope" hidden></p>
       <div id="pending" role="group" aria-labelledby="pending-title" hidden>
@@ -43,8 +81,19 @@
       <p id="error" role="alert" hidden></p>
       <div id="result-tools" class="toolbar" hidden><button id="copy-result">نسخ النتيجة</button><button id="download-result">تنزيل التقرير</button><span id="export-status" role="status" class="hint"></span></div>
       <section id="result" class="result" aria-label="النتيجة والمصادر" hidden></section>
+      <section id="artifacts" class="scope" aria-labelledby="artifacts-title" hidden>
+        <h3 id="artifacts-title">ملفات المهمة</h3>
+        <p class="hint">نسخ محلية محفوظة حتى تحذفها. حذفها هنا لا يحذف الملف من الموقع الأصلي.</p>
+        <form id="file-form" hidden>
+          <label for="task-file">اختيار ملف لهذه المهمة</label>
+          <input id="task-file" type="file" aria-describedby="file-help">
+          <p id="file-help" class="hint">تُحفظ نسخة محلية حتى تحذفها، بحد 20 ميغابايت وخمسة ملفات للمهمة. إضافتها لا ترسلها إلى موقع؛ يظهر اعتماد منفصل قبل الرفع.</p>
+          <button id="file-add" type="submit">إضافة الملف للمهمة</button>
+        </form>
+        <div id="artifact-list"></div><p id="artifact-status" role="status"></p>
+      </section>
       <section id="followup" hidden>
-        <h3>تابع هذه المهمة</h3><p class="hint">تحتفظ المتابعة بسياق آخر نتيجة وتتحقق من الصفحة مجددًا.</p>
+        <h3>تابع هذه المهمة</h3><p class="hint">تحتفظ المتابعة بسياق آخر نتيجة ومراجع ملفاتها المتاحة، وتتحقق من الصفحة والملفات مجددًا. يمكنك إزالة أي مرجع دون حذف الأصل.</p>
         <div id="suggestions" class="toolbar"></div>
         <form id="followup-form">
           <label for="followup-task">ما الذي تريد التعمق فيه؟</label>
@@ -55,6 +104,60 @@
       </section>
       <details id="event-log"><summary>سجل الخطوات</summary><ol id="events"></ol></details>
     </section>
+    <details id="history" class="card">
+      <summary>النتائج السابقة وملفاتها</summary>
+      <p class="hint">راجع التقارير المحفوظة وملفاتها. فتح نتيجة هنا لا يغير المهمة الحالية ولا يستأنف تنفيذًا سابقًا.</p>
+      <div class="toolbar"><button id="history-refresh" type="button">تحديث السجل</button><button id="history-previous" type="button" disabled>النتائج الأحدث</button><button id="history-next" type="button" disabled>النتائج الأقدم</button></div>
+      <p id="history-status" role="status" class="hint"></p>
+      <ul id="history-list"></ul>
+      <section id="history-delete-preview" class="scope" aria-labelledby="history-delete-title" hidden>
+        <h3 id="history-delete-title">حذف نتيجة محفوظة</h3>
+        <p id="history-delete-target"></p>
+        <p>سيُحذف التقرير ونقطة متابعته إن وُجدت وملفاته المحلية نهائيًا. حذف أصل ملف يعطّل مراجع المتابعات التابعة له؛ حذف مرجع فقط يترك أصله. النسخ المصدّرة أو المرسلة للمواقع لا تُحذف.</p>
+        <p class="hint">يبقى سجل العمليات الأدنى لمنع تكرار الإرسال، وعلامة حذف بلا محتوى للتقرير. لا يمكن التراجع عن الحذف المحلي.</p>
+        <p id="history-delete-wait" role="status"></p>
+        <div class="toolbar"><button id="history-delete-cancel" type="button">الاحتفاظ بالنتيجة</button><button id="history-delete-confirm" type="button" class="danger">حذف التقرير وملفاته نهائيًا</button></div>
+      </section>
+      <section id="history-detail" aria-label="تفاصيل النتيجة المحفوظة" hidden>
+        <button id="history-download" type="button">تنزيل التقرير المحفوظ</button>
+        <form id="retention-form" class="scope">
+          <label for="retention-days">الاحتفاظ بهذه النتيجة وملفاتها</label>
+          <select id="retention-days"><option value="">حتى الحذف اليدوي</option><option value="1">يوم من الآن</option><option value="7">7 أيام من الآن</option><option value="30">30 يومًا من الآن</option><option value="90">90 يومًا من الآن</option></select>
+          <p class="hint">عند الموعد يُحجب التقرير ونقطة متابعته إن وُجدت وتُحذف ملفاته المحلية. قد تتوقف متابعة تعتمد على سياقه أو أصول ملفاته. النسخ المصدّرة والتقارير الأخرى تبقى؛ تغيير المدة متاح قبل انتهائها وبعد انتهاء المهمة الجارية أو إيقافها.</p>
+          <button id="retention-save" type="submit">حفظ مدة الاحتفاظ</button>
+          <p id="retention-status" role="status" class="hint"></p>
+        </form>
+        <div id="history-result" class="result"></div>
+        <section id="checkpoint-review" class="scope" hidden>
+          <h3>نقطة المتابعة المحفوظة</h3>
+          <p id="checkpoint-text"></p><p id="checkpoint-resume-status" role="status"></p>
+          <details id="checkpoint-editor">
+            <summary>تعديل نص المتابعة</summary>
+            <form id="checkpoint-edit-form">
+              <label for="checkpoint-edit-brief">النص المعدّل للمتابعة</label>
+              <textarea id="checkpoint-edit-brief" rows="3" maxlength="4000" required></textarea>
+              <p class="hint">يُستبدل النص المحفوظ فقط؛ تبقى مدة الاحتفاظ والملفات وسجل العمليات ووضع التدخل كما هي. لا تكتب أسرارًا. احفظ التعديل أو ألغِه قبل الاستئناف.</p>
+              <button id="checkpoint-edit-submit" type="submit">حفظ تعديل النقطة</button>
+              <p id="checkpoint-edit-status" role="status"></p>
+            </form>
+          </details>
+          <button id="checkpoint-reload" type="button">إلغاء التعديل وإعادة تحميل النقطة</button>
+          <p class="hint">الاستئناف يبدأ قراءة جديدة للجلسة والوجهة والحساب، مع سجل العمليات السابق لمنع تكرار الإرسال. افحص أي أثر مجهول. لا يعيد اعتماد خطوة قديمة، ولا يبدأ بمجرد فتح التقرير. يستعمل المحرك المختار أعلى الصفحة.</p>
+          <button id="checkpoint-resume" type="button">استئناف نقطة المتابعة</button>
+          <section id="checkpoint-recovery" hidden>
+            <h4>مراجعة آخر محاولة للمتابعة</h4>
+            <p id="checkpoint-recovery-reason" role="status"></p>
+            <p id="checkpoint-recovery-uncertain" class="hint" hidden>يوجد أثر غير مؤكد في سجل العمليات. افحصه في الموقع وسجّل نتيجة الفحص؛ إعادة تجهيز النقطة لا تمحو هذا الحاجز.</p>
+            <button id="checkpoint-attempt-report" type="button">عرض تقرير آخر محاولة</button>
+            <p class="hint">إعادة التجهيز تفتح النص المحفوظ للتعديل والمراجعة، مع ملفات النقطة الأصلية وسجل العمليات نفسه. لا تعيد بناء التقدم أو تضم الملفات الجديدة من المحاولة تلقائيًا؛ راجع تقريرها وملفاتها. لا يبدأ المتصفح حتى تختار الاستئناف مجددًا.</p>
+            <button id="checkpoint-prepare" type="button">إعادة تجهيز النقطة بعد فحص المحاولة</button>
+          </section>
+        </section>
+        <h3>ملفات هذه النتيجة</h3>
+        <p class="hint">حذف الأصل المحلي يمنع استخدام مراجع المتابعات التابعة له. لا يحذف أي نسخة سبق إرسالها إلى موقع.</p>
+        <div id="history-files"></div><p id="history-file-status" role="status"></p>
+      </section>
+    </details>
     <footer>__BROWSER_MODE__ قد تحتاج بعض المواقع إلى تدخلك اليدوي.</footer>
   </main>
 </body></html>

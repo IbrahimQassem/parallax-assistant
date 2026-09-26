@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 
 KINDS = ("navigate", "click", "fill", "select", "press", "scroll", "switch_tab",
-         "wait", "handoff", "finish")
+         "wait", "handoff", "finish", "plan", "expect", "operation", "download", "upload")
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -50,9 +50,15 @@ class Action:
             raise ValueError("نوع الخطوة غير مسموح.")
         if action.kind == "navigate":
             web_url(action.value)
-        if action.kind in {"click", "fill", "select", "press", "switch_tab"}:
+        if action.kind in {"click", "fill", "select", "press", "switch_tab", "download", "upload"}:
             if not action.target.isdigit():
                 raise ValueError("يجب اختيار عنصر من الصفحة الحالية.")
+        if action.kind == "download" and action.value:
+            raise ValueError("التنزيل يستعمل الرابط المرصود؛ لا يقبل مسارًا أو اسمًا من المحرك.")
+        if action.kind == "upload" and not re.fullmatch(r"[0-9a-f]{32}", action.value):
+            raise ValueError("الرفع يستعمل معرّف ملف متاح في المهمة، وليس مسارًا على الجهاز.")
+        if action.kind == "plan" and (not action.target.isascii() or not action.target.isdecimal()):
+            raise ValueError("يلزم رقم نسخة الخطة الحالية.")
         if action.kind == "press" and action.value not in {"Enter", "Tab", "Escape"}:
             raise ValueError("المفتاح غير مسموح.")
         if action.kind == "scroll" and action.value not in {"up", "down"}:
@@ -69,6 +75,10 @@ def approval_reason(action: Action, target: dict | None = None, mode="browse") -
     DOM semantics are a heuristic, not proof of a site's behavior. Unknown controls,
     forms and changes stay gated; do not infer authority from action.reason.
     """
+    if action.kind == "download":
+        return "حفظ ملف من الرابط المعروض محليًا، بحد 20 ميغابايت. يبقى حتى تحذف نسخته المحلية."
+    if action.kind == "upload":
+        return "سيُسلّم الملف المحدد إلى حقل الموقع المعروض، وقد يرسله الموقع فور اختياره. راجع النسخة والوجهة."
     if action.kind not in {"click", "fill", "select", "press"}:
         return None
     if mode == "review":

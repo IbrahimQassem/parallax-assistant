@@ -9,10 +9,12 @@ import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .browser import PersonalBrowser
 from .runtime import Assistant
+from .artifacts import MAX_BYTES
+from .checkpoints import CheckpointConflict
 
 
 STATIC = Path(__file__).with_name("static")
@@ -29,6 +31,7 @@ class LocalServer(ThreadingHTTPServer):
         super().__init__(address, Handler)
         self.origin = f"http://127.0.0.1:{self.server_port}"
         assistant.browser.blocked_origin = self.origin
+        loop.call_soon_threadsafe(assistant.ensure_maintenance)
 
     def dispatch(self, coroutine):
         return asyncio.run_coroutine_threadsafe(coroutine, self.loop).result(timeout=15)
@@ -40,7 +43,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
         pass  # Request paths and task contents do not belong in terminal logs.
 
-    def respond(self, status, body, content_type="application/json; charset=utf-8"):
+    def respond(self, status, body, content_type="application/json; charset=utf-8", headers=None):
         if not isinstance(body, bytes):
             body = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(status)
@@ -50,6 +53,8 @@ class Handler(BaseHTTPRequestHandler):
             "Referrer-Policy": "no-referrer",
             "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
         }.items():
+            self.send_header(name, value)
+        for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
@@ -85,6 +90,41 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(200, (STATIC / path[1:]).read_bytes(), mime + "; charset=utf-8")
         elif path == "/api/state":
             self.respond(200, self.server.assistant.snapshot())
+        elif path == "/api/history":
+            try:
+                query = parse_qs(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=1)
+                if set(query) - {"cursor"}:
+                    raise ValueError("موضع السجل غير صالح.")
+                page = self.server.assistant.saved_reports.page(query.get("cursor", [""])[0])
+                for item in page["items"]:
+                    checkpoint = self.server.assistant.checkpoints.public(item["id"]) if item["available"] else None
+                    if checkpoint:
+                        item["summary"] = "نقطة متابعة: " + checkpoint["brief"][:120]
+                self.respond(200, page)
+            except ValueError:
+                self.respond(400, {"error": "تعذّر قراءة السجل؛ حدّث القائمة وحاول مجددًا."})
+            except OSError:
+                self.respond(503, {"error": "تعذّر فتح سجل النتائج."})
+        elif path.startswith("/api/history/"):
+            try:
+                identifier = path.removeprefix("/api/history/")
+                report = self.server.assistant.saved_reports.load(identifier)
+                report["checkpoint"] = self.server.assistant.inspect_checkpoint(identifier)
+                try:
+                    report.update(artifacts=self.server.assistant.artifacts.list(identifier), artifacts_error=None)
+                except (OSError, ValueError):
+                    report.update(artifacts=[], artifacts_error="تعذّر قراءة ملفات هذه النتيجة؛ التقرير ما زال متاحًا.")
+                self.respond(200, report)
+            except (ValueError, OSError):
+                self.respond(404, {"error": "التقرير المحفوظ غير متاح."})
+        elif path.startswith("/api/files/"):
+            try:
+                prefix, api, files, task_id, identifier = path.split("/")
+                row, data = self.server.assistant.artifacts.read(task_id, identifier)
+                self.respond(200, data, "application/octet-stream", {
+                    "Content-Disposition": "attachment; filename=download.bin; filename*=UTF-8''" + quote(row["name"], safe="")})
+            except (ValueError, OSError):
+                self.respond(404, {"error": "الملف غير متاح أو تغير محتواه."})
         else:
             self.respond(404, {"error": "غير موجود."})
 
@@ -92,6 +132,21 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed(api=True, write=True):
             return
         try:
+            if self.path == "/api/files/add":
+                if (self.headers.get("Content-Type") != "application/octet-stream" or "Content-Length" not in self.headers
+                        or self.headers.get("Transfer-Encoding")):
+                    raise ValueError("يلزم ملف بحجم محدد.")
+                size = int(self.headers["Content-Length"])
+                if not 0 <= size <= MAX_BYTES:
+                    raise ValueError("حجم الملف غير مسموح.")
+                content = self.rfile.read(size)
+                if len(content) != size:
+                    raise ValueError("لم يصل الملف كاملًا.")
+                result = self.server.dispatch(self.server.assistant.attach_file(
+                    self.headers.get("X-Parallax-Task", ""),
+                    unquote(self.headers.get("X-Parallax-Filename", ""), errors="strict"), content))
+                self.respond(200, result)
+                return
             if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
                 raise ValueError("يلزم JSON.")
             size = int(self.headers.get("Content-Length", "0"))
@@ -107,10 +162,33 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/control":
                 result = self.server.dispatch(self.server.assistant.control(
                     data.get("command"), data.get("token", ""), data.get("note", "")))
+            elif self.path == "/api/files/delete":
+                self.server.assistant.artifacts.delete(data.get("task_id"), data.get("id"))
+                result = self.server.assistant.snapshot()
+            elif self.path == "/api/history/delete":
+                result = self.server.dispatch(self.server.assistant.delete_saved_task(data.get("id")))
+            elif self.path == "/api/history/retention":
+                if "days" not in data:
+                    raise ValueError("اختر مدة الاحتفاظ.")
+                result = self.server.dispatch(self.server.assistant.set_retention(data.get("id"), data["days"]))
+            elif self.path == "/api/checkpoints/save":
+                result = self.server.dispatch(self.server.assistant.save_checkpoint(
+                    data.get("id"), data.get("brief"), data.get("days")))
+            elif self.path == "/api/checkpoints/resume":
+                result = self.server.dispatch(self.server.assistant.resume_checkpoint(
+                    data.get("id"), data.get("provider", self.server.provider), data.get("revision")))
+            elif self.path == "/api/checkpoints/update":
+                result = self.server.dispatch(self.server.assistant.update_checkpoint(
+                    data.get("id"), data.get("brief"), data.get("revision")))
+            elif self.path == "/api/checkpoints/prepare":
+                result = self.server.dispatch(self.server.assistant.prepare_checkpoint_again(
+                    data.get("id"), data.get("revision")))
             else:
                 self.respond(404, {"error": "غير موجود."})
                 return
             self.respond(200, result)
+        except CheckpointConflict as error:
+            self.respond(409, {"error": str(error), "code": "checkpoint_conflict"})
         except (ValueError, TypeError):
             self.respond(400, {"error": "طلب غير صالح أو انتهت صلاحية الخطوة. حدّث الحالة وحاول مجددًا."})
         except TimeoutError:
