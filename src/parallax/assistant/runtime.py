@@ -878,6 +878,15 @@ class Assistant:
                     effect_page = preview["target"]["href"] if action.kind == "download" else snapshot["url"]
                     requires_approval = policy_reason is not None
                     if requires_approval:
+                        # Planning can outlive async validation or a rerender. Do not
+                        # ask the user to approve a preview already known to be stale.
+                        fresh = await self.browser.observe()
+                        if self.pause_requested.is_set() or revision != self.snapshot()["context_revision"]:
+                            continue
+                        if fresh["fingerprint"] != preview["fingerprint"]:
+                            history.append({"controller_error": "Page changed before approval preview. No action executed; replan from the current page."})
+                            self.event("تغيّرت الصفحة أثناء التخطيط؛ سأحدّث الخطوة قبل طلب موافقتك.")
+                            continue
                         try:
                             self.journal.check(action, effect_page, preview.get("target"), self.state["operation_group"],
                                                form_state=snapshot.get("form_hashes"))

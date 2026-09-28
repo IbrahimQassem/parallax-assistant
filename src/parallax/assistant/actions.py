@@ -100,9 +100,12 @@ def approval_reason(action: Action, target: dict | None = None, mode="browse") -
         return None
     if role == "tab" and target.get("controls_role") == "tabpanel":
         return None
-    if (target.get("tag") == "button" or role == "button") and target.get("has_popup") == "menu":
-        return None
-    if target.get("expanded") in {"true", "false"} and target.get("controls_role") in {"menu", "navigation", "tablist"}:
+    if target.get("tag") == "button" or role == "button":
+        if target.get("has_popup") in {"menu", "dialog"}:
+            return None
+        if target.get("popover_action") in {"show", "toggle", "hide"}:
+            return None
+    if target.get("expanded") in {"true", "false"} and target.get("controls_role") in {"menu", "navigation", "tablist", "region"}:
         return None
     if role == "menuitem" and label.strip() in {"settings", "personalization", "preferences", "الإعدادات", "الاعدادات", "التخصيص", "التفضيلات"}:
         return None

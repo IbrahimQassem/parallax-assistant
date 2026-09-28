@@ -472,7 +472,7 @@ def test_general_plan_and_user_revision_through_local_ui(tmp_path, structured):
 
         def preview(self, action, snapshot):
             return {"action": action.to_dict(), "page": snapshot["url"], "fingerprint": "same",
-                    "target": {"tag": "button", "label": "Send"}}
+                    "target": {"tag": "button", "label": "Send", "context": 'REQUEST-42 <img src=x onerror="window.contextInjected=true">'}}
 
         async def execute(self, action): self.executed.append(action)
         async def close(self): self.context = None
@@ -524,6 +524,10 @@ def test_general_plan_and_user_revision_through_local_ui(tmp_path, structured):
                 await expect(page.locator("#plan-content")).to_contain_text("عرض مقارنة بمصادر مقروءة")
                 await expect(page.locator("#pending-title")).to_have_text("قرار واحد قبل المتابعة")
                 await expect(page.locator("#details")).to_contain_text("الحالة: مرسل" if structured else "REQUEST-42 sent")
+                await expect(page.locator("#details")).to_contain_text("سياق الصف")
+                await expect(page.locator("#details")).to_contain_text("REQUEST-42 <img src=x")
+                assert await page.locator("#details img").count() == 0
+                assert await page.evaluate("window.contextInjected") is None
                 if structured:
                     await expect(page.locator("#details")).to_contain_text("تسميات بديلة لحقل الحالة")
                     await expect(page.locator("#details")).to_contain_text("حالة الطلب")

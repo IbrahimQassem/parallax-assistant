@@ -19,7 +19,8 @@ from .file_transfer import retrieve_file
 
 
 OBSERVE = r"""() => {
-  const visible = el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
+  const visible = el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden' &&
+    !el.closest('[inert],[hidden],[aria-hidden="true"]');
   const labelText = label => {
     const walker=document.createTreeWalker(label,NodeFilter.SHOW_TEXT), parts=[];
     while(walker.nextNode()) {
@@ -31,8 +32,33 @@ OBSERVE = r"""() => {
   const sensitive = el => /password|hidden|file/.test(el.type || '') ||
     /password|one-time|cc-|credit|card.?number|cvv|cvc|\botp\b|secret|token|\bpin\b|pin[-_]?code/i.test(
       [el.name,el.id,el.autocomplete,el.getAttribute('aria-label')].join(' '));
-  const allNodes = [...document.querySelectorAll('a[href],button,input,textarea,select,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[contenteditable="true"]')].filter(visible);
-  const nodes = allNodes.slice(0, 200);
+  const allNodes = [...document.querySelectorAll('a[href],button,input,textarea,select,summary,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="switch"],[role="checkbox"],[role="radio"],[role="menuitemcheckbox"],[role="menuitemradio"],[tabindex]:not([tabindex="-1"]),[onclick],[contenteditable="true"]')].filter(visible);
+  const inViewport = el => {
+    const r = el.getBoundingClientRect();
+    let left=Math.max(0,r.left), top=Math.max(0,r.top), right=Math.min(innerWidth,r.right), bottom=Math.min(innerHeight,r.bottom);
+    for (let parent=el.parentElement; parent; parent=parent.parentElement) {
+      const style=getComputedStyle(parent), bounds=parent.getBoundingClientRect();
+      if (/auto|scroll|hidden|clip/.test(style.overflowX)) { left=Math.max(left,bounds.left);right=Math.min(right,bounds.right); }
+      if (/auto|scroll|hidden|clip/.test(style.overflowY)) { top=Math.max(top,bounds.top);bottom=Math.min(bottom,bounds.bottom); }
+    }
+    return right>left && bottom>top;
+  };
+  // Off-screen navigation must not permanently crowd out controls after scrolling.
+  // Keep DOM order within each priority, and keep the original order on small pages.
+  const ranked = allNodes.length > 200 ? allNodes.map(node => ({node, priority:
+    (inViewport(node) ? 2 : 0) + (node.closest('dialog[open],[role="dialog"],[role="alertdialog"]') ? 1 : 0)}))
+    .sort((a,b)=>b.priority-a.priority).map(item=>item.node) : allNodes;
+  const nodes = ranked.slice(0, 200);
+  const labelledBy = node => (node.getAttribute('aria-labelledby') || '').split(/\s+/)
+    .map(id=>document.getElementById(id)).filter(el=>el && visible(el)).map(labelText).join(' ');
+  const rowContext = node => {
+    const row=node.closest('tr,[role="row"]');
+    return row && !row.closest('form,[contenteditable="true"]') ? labelText(row).slice(0,600) : '';
+  };
+  const popover = node => {
+    const target=document.getElementById(node.getAttribute('popovertarget'));
+    return target?.hasAttribute('popover') ? (node.getAttribute('popovertargetaction') || 'toggle') : '';
+  };
   const owner = node => node.form || node.closest('form');
   // Named form controls can shadow form.action, form.method and even methods.
   const formProperty = (form,key) => Object.getOwnPropertyDescriptor(HTMLFormElement.prototype,key).get.call(form);
@@ -92,6 +118,7 @@ OBSERVE = r"""() => {
     if (valid) addRecord(pairs);
   }
   return {
+    total: allNodes.length,
     text: (document.body?.innerText || '').slice(0, 16000),
     blocks,
     records,
@@ -109,17 +136,30 @@ OBSERVE = r"""() => {
       has_popup: node.getAttribute('aria-haspopup') || '',
       expanded: node.getAttribute('aria-expanded') || '',
       controls_role: document.getElementById(node.getAttribute('aria-controls'))?.getAttribute('role') || '',
+      popover_action: popover(node),
       in_form: !!(node.form || node.closest('form')),
       editable: node.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(node.tagName),
       download: node.hasAttribute('download'),
-      label: (node.getAttribute('aria-label') || [...(node.labels || [])].map(labelText).join(' ') ||
+      label: (node.getAttribute('aria-label') || labelledBy(node) || [...(node.labels || [])].map(labelText).join(' ') ||
         node.innerText || node.placeholder || node.getAttribute('title') || '').slice(0, 500),
+      context: rowContext(node),
       href: node.tagName === 'A' ? node.href : '',
-      sensitive: sensitive(node), disabled: !!node.disabled,
+      sensitive: sensitive(node), disabled: !!node.disabled || node.matches(':disabled') || node.getAttribute('aria-disabled') === 'true',
       options: node.tagName === 'SELECT' ? [...node.options].map(o=>({value:o.value,label:o.text})).slice(0,100) : []
     }}))
   };
 }"""
+
+
+SETTLE = r"""() => new Promise(resolve => {
+  let quiet;
+  const finish = () => { observer.disconnect(); clearTimeout(quiet); clearTimeout(limit); resolve(); };
+  const changed = () => { clearTimeout(quiet); quiet=setTimeout(finish,200); };
+  const observer = new MutationObserver(changed);
+  const limit = setTimeout(finish,1000);
+  observer.observe(document.documentElement,{subtree:true,childList:true,attributes:true,characterData:true});
+  changed();
+})"""
 
 
 class PersonalBrowser:
@@ -257,10 +297,15 @@ class PersonalBrowser:
         self.tab_ids = {str(i): p for i, p in enumerate(pages) if not p.is_closed()}
         if self.page.url != "about:blank" and not await self._allowed(self.page.url):
             raise ValueError("الصفحة الحالية غير مسموحة للمساعد. افتح موقعًا عامًا في تبويب المساعد.")
-        items, texts, form_hashes, evidence_blocks, evidence_records = [], [], [], [], []
+        items, texts, form_hashes, evidence_blocks, evidence_records, observation_limits = [], [], [], [], [], []
         for frame in self.page.frames[:10]:
             try:
                 observation = await frame.evaluate_handle(OBSERVE)
+                total_handle = await observation.get_property("total")
+                total = await total_handle.json_value()
+                await total_handle.dispose()
+                observation_limits.append({"frame": frame.url, "total": total, "shown": min(total, 200),
+                                           "truncated": total > 200})
                 text_handle = await observation.get_property("text")
                 texts.append(await text_handle.json_value())
                 blocks_handle = await observation.get_property("blocks")
@@ -324,6 +369,7 @@ class PersonalBrowser:
             "form_hashes": form_hashes,
             "evidence_blocks": bounded_blocks,
             "evidence_records": bounded_records,
+            "observation_limits": observation_limits,
             "tabs": [{"id": i, "url": p.url} for i, p in self.tab_ids.items()],
         }
         snapshot["fingerprint"] = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
@@ -395,6 +441,10 @@ class PersonalBrowser:
                 await element.press(action.value)
         # A short settling interval is bounded; never retry a submitted action automatically.
         await asyncio.sleep(0.35)
+        if action.kind in {"click", "fill", "select", "press", "scroll"}:
+            # Wait for debounced validation and rerenders, without waiting forever
+            # for dashboards with continuous updates or issuing the action twice.
+            await self.page.evaluate(SETTLE)
 
     async def close(self):
         context, playwright = self.context, self.playwright

@@ -352,6 +352,7 @@ function render(state) {
     $("details").replaceChildren();
     if (p.type==="approval") {
       const rows=p.operation ? [["الصفحة",p.page],["الهوية",conditionText(p.operation.identity)],["حدود الاعتماد","هذه القيم فقط، مرة واحدة، خلال خمس دقائق من الموافقة"]] : [["الصفحة",p.page],["الإجراء",verbs[p.action.kind]],["العنصر",p.target?.label || p.target?.tag],["القيمة",p.action.value || "—"]];
+      if (!p.operation && p.target?.context) rows.push(["سياق الصف",p.target.context]);
       for (const [label,value] of rows) {
         const dt=document.createElement("dt"),dd=document.createElement("dd");
         dt.textContent=label;dd.textContent=value;$("details").append(dt,dd);

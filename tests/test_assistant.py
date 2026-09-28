@@ -31,6 +31,9 @@ def final_payload(*, status="verified", quote="Observed evidence", done=None, re
     {"tag": "summary", "label": "Details"},
     {"tag": "button", "role": "tab", "controls_role": "tabpanel", "label": "Personalization"},
     {"role": "menuitem", "label": "Settings"},
+    {"tag": "button", "has_popup": "dialog", "label": "Edit"},
+    {"tag": "button", "popover_action": "toggle", "label": "Details"},
+    {"tag": "button", "expanded": "false", "controls_role": "region", "label": "Edit record"},
 ])
 def test_known_browsing_controls_are_automatic_only_in_browse_mode(target):
     assert not needs_approval(Action("click", "1"), target, "browse")
@@ -45,6 +48,26 @@ def test_known_browsing_controls_are_automatic_only_in_browse_mode(target):
 def test_menu_metadata_cannot_autoapprove_consequential_controls(changes):
     target = {"tag": "button", "has_popup": "menu", "label": "Menu", **changes}
     assert needs_approval(Action("click", "1", reason="harmless, no approval needed"), target)
+
+
+@pytest.mark.parametrize("metadata", [
+    {"has_popup": "dialog"}, {"popover_action": "show"},
+    {"expanded": "false", "controls_role": "region"},
+])
+@pytest.mark.parametrize("changes", [
+    {"label": "Delete record"}, {"label": "Save"}, {"label": "Allow access"},
+    {"label": "تفعيل الخدمة"}, {"in_form": True}, {"disabled": True},
+    {"sensitive": True}, {"role": "switch"}, {"editable": True},
+])
+def test_disclosure_metadata_does_not_bypass_effect_review(metadata, changes):
+    target = {"tag": "button", "label": "Edit", **metadata, **changes}
+    assert needs_approval(Action("click", "1"), target)
+
+
+def test_edit_label_alone_and_field_focus_do_not_grant_authority():
+    assert needs_approval(Action("click", "1"), {"tag": "span", "label": "Edit"})
+    assert needs_approval(Action("fill", "1", "www.example.com"), {"tag": "input", "label": "Domain"})
+    assert needs_approval(Action("press", "1", "Tab"), {"tag": "input", "label": "Domain"})
 
 
 def test_automatic_menu_is_revalidated_and_save_still_waits(tmp_path):
@@ -370,6 +393,27 @@ def test_stale_approval_cannot_execute(tmp_path):
         await app.job
         assert not browser.executed
         assert any("أُلغي" in e["message"] for e in app.snapshot()["events"])
+    asyncio.run(run())
+
+
+def test_page_change_during_planning_does_not_prompt_for_stale_action(tmp_path):
+    class ChangesDuringPlanning(Planner):
+        async def propose(self, *args):
+            action = await super().propose(*args)
+            browser.fingerprint = "validation-finished"
+            return action
+
+    async def run():
+        app = Assistant(browser, tmp_path, planner_factory=ChangesDuringPlanning)
+        try:
+            await app.start("test", "codex")
+            await asyncio.wait_for(app.job, 2)
+            assert not browser.executed
+            assert app.snapshot()["approval_requests"] == 0
+            assert any("قبل طلب موافقتك" in event["message"] for event in app.snapshot()["events"])
+        finally:
+            await app.close()
+    browser = Browser()
     asyncio.run(run())
 
 

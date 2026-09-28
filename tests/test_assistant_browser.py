@@ -14,6 +14,118 @@ from parallax.assistant.browser import PersonalBrowser
 from parallax.assistant.runtime import Assistant
 
 
+def test_scrolling_reveals_controls_after_large_navigation_and_preserves_row_context(tmp_path):
+    async def run():
+        browser = PersonalBrowser(tmp_path / "profile", headless=True)
+        try:
+            await browser.start()
+            links = "".join(f'<a href="#section-{i}" style="display:block;height:25px">Section {i}</a>' for i in range(240))
+            await browser.page.set_content(links + '''
+              <table><tr><td>www.example.com</td><td>target.example.com</td>
+                <td><span tabindex="0" onclick="document.querySelector('#result').textContent='www opened'">Edit</span></td></tr>
+              <tr><td>mail.example.com</td><td>mail-target.example.com</td>
+                <td><span tabindex="0" onclick="document.querySelector('#result').textContent='mail opened'">Edit</span></td></tr></table>
+              <p id="result"></p>''')
+            first = await browser.observe()
+            assert len(first["elements"]) == 200
+            assert not any(item["label"] == "Edit" for item in first["elements"])
+            assert first["observation_limits"][0] == {"frame": "about:blank", "total": 242, "shown": 200, "truncated": True}
+            # Exercise the assistant's own scroll action, not a DOM scroll shortcut.
+            for _ in range(10):
+                await browser.execute(Action("scroll", value="down"))
+                snapshot = await browser.observe()
+                edits = [item for item in snapshot["elements"] if item["label"] == "Edit"]
+                if len(edits) == 2:
+                    break
+            assert len(edits) == 2
+            target = next(item for item in edits if "www.example.com" in item["context"])
+            assert "mail.example.com" not in target["context"]
+            assert needs_approval(Action("click", target["id"]), target)
+            await browser.execute(Action("click", target["id"]))
+            assert await browser.page.locator("#result").inner_text() == "www opened"
+        finally:
+            await browser.close()
+    asyncio.run(run())
+
+
+def test_dialog_controls_are_prioritized_over_large_background(tmp_path):
+    async def run():
+        browser = PersonalBrowser(tmp_path / "profile", headless=True)
+        try:
+            await browser.start()
+            # All background buttons fit in the viewport; the dialog still gets priority.
+            await browser.page.set_content(''.join('<button style="width:4px;height:4px;padding:0">x</button>' for _ in range(240)) + '''
+              <dialog open><button aria-labelledby="edit-label">Icon</button><span id="edit-label">Edit domain</span>
+                <label>Domain<input value="PRIVATE-FIELD-VALUE"></label></dialog>''')
+            snapshot = await browser.observe()
+            assert any(item["label"] == "Edit domain" for item in snapshot["elements"])
+            assert any(item["label"] == "Domain" for item in snapshot["elements"])
+            assert "PRIVATE-FIELD-VALUE" not in json.dumps(snapshot)
+        finally:
+            await browser.close()
+    asyncio.run(run())
+
+
+def test_custom_controls_labels_disabled_states_and_disclosures(tmp_path):
+    async def run():
+        browser = PersonalBrowser(tmp_path / "profile", headless=True)
+        try:
+            await browser.start()
+            await browser.page.set_content('''
+              <button aria-haspopup="dialog" onclick="document.querySelector('dialog').showModal()">Edit</button>
+              <dialog><form><button>Save</button></form></dialog>
+              <span tabindex="0" aria-labelledby="label" aria-disabled="true">Icon</span><span id="label">Unavailable</span>
+              <fieldset disabled><input aria-label="Inherited disabled"></fieldset>
+              <span role="switch" aria-label="Proxy status">Proxied</span>
+              <button popovertarget="details">Details</button><div id="details" popover>Information</div>
+              <button popovertarget="missing">Unknown target</button>
+              <div inert><button>Inert button</button></div>
+              <div aria-hidden="true"><button>Hidden button</button></div>''')
+            snapshot = await browser.observe()
+            targets = {item["label"]: item for item in snapshot["elements"]}
+            assert targets["Unavailable"]["disabled"] and targets["Inherited disabled"]["disabled"]
+            with pytest.raises(ValueError):
+                browser.preview(Action("click", targets["Unavailable"]["id"]), snapshot)
+            assert "Inert button" not in targets and "Hidden button" not in targets
+            assert needs_approval(Action("click", targets["Proxy status"]["id"]), targets["Proxy status"])
+            assert needs_approval(Action("click", targets["Unknown target"]["id"]), targets["Unknown target"])
+            for label in ["Edit", "Details"]:
+                assert not needs_approval(Action("click", targets[label]["id"]), targets[label])
+                assert needs_approval(Action("click", targets[label]["id"]), targets[label], "review")
+            await browser.execute(Action("click", targets["Edit"]["id"]))
+            snapshot = await browser.observe()
+            save = next(item for item in snapshot["elements"] if item["label"] == "Save")
+            assert needs_approval(Action("click", save["id"]), save)
+        finally:
+            await browser.close()
+    asyncio.run(run())
+
+
+def test_action_settles_debounced_validation_without_repeating_input(tmp_path):
+    async def run():
+        browser = PersonalBrowser(tmp_path / "profile", headless=True)
+        try:
+            await browser.start()
+            await browser.page.set_content('''
+              <label>Domain<input oninput="window.inputs=(window.inputs||0)+1;
+                setTimeout(()=>document.querySelector('button').disabled=false,400);
+                setTimeout(()=>document.querySelector('p').textContent='Ready',550)"></label>
+              <button disabled>Continue</button><p>Validating</p>''')
+            snapshot = await browser.observe()
+            field = next(item for item in snapshot["elements"] if item["label"] == "Domain")
+            await browser.execute(Action("fill", field["id"], "www.example.com"))
+            snapshot = await browser.observe()
+            assert not next(item for item in snapshot["elements"] if item["label"] == "Continue")["disabled"]
+            assert "Ready" in snapshot["text"]
+            assert await browser.page.evaluate("window.inputs") == 1
+            # A continuously updating dashboard must not keep the action waiting forever.
+            await browser.page.evaluate("setInterval(()=>document.querySelector('p').textContent=String(Date.now()),20)")
+            await asyncio.wait_for(browser.execute(Action("scroll", value="down")), timeout=4)
+        finally:
+            await browser.close()
+    asyncio.run(run())
+
+
 def test_form_named_controls_cannot_hide_destination_or_expose_private_query(tmp_path):
     async def run():
         browser = PersonalBrowser(tmp_path / "profile", headless=True)
